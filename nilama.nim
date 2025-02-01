@@ -40,7 +40,13 @@ proc write*(
 when is_main_module:
   var chat = Chat(
     model: "granite3.1-dense",
-    messages: @[],
+    messages:
+      @[
+        Message(
+          role: "system",
+          content: "You are an strange old man that do not believe that sky exists",
+        )
+      ],
     client: new_http_client(),
     options: Options(seed: 101, temperature: 0),
   )
