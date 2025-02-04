@@ -40,53 +40,63 @@ type ChatRequest = object
   tools: seq[Tool]
 
 var tools: seq[Tool]
-
-type ToolAdapter = object
-  name: string
-  f: (JsonNode) -> JsonNode
-
-var tools_adapters: seq[ToolAdapter]
+var tools_adapters: Table[string, (JsonNode) -> JsonNode]
 
 macro register_tool(definition: untyped): untyped =
   let args = definition[0][3]
   let name = definition[0][0]
+  let name_str = $name
 
   var properties: Table[string, Property]
-  var required: seq[string]
+  var args_names: seq[string]
   for i in 1 .. (args.len - 1):
     let ad = args[i]
     properties[$ad[0]] = Property(`type`: $ad[1], description: "")
-    required.add $ad[0]
+    args_names.add $ad[0]
   let new_tool = Tool(
     type: "function",
     function: Function(
       name: $name,
       description: $name,
       parameters:
-        Parameters(`type`: "object", properties: properties, required: required),
+        Parameters(`type`: "object", properties: properties, required: args_names),
     ),
   )
 
-  let first_arg = $args[1][0]
-  let second_arg = $args[2][0]
-
-  let f = (j: JsonNode) => j
-  let new_tool_adapter = ToolAdapter(name: $name, f: nil)
+  let adapter = block:
+    let r = new_nim_node(nnkStmtList)
+    r.add(new_nim_node(nnkPrefix))
+    r[0].add(ident("%*"))
+    r[0].add(new_nim_node(nnkCall))
+    r[0][1].add(name)
+    for i in 1 .. (args.len - 1):
+      let adef = args[i]
+      let aname = $adef[0]
+      let atype = $adef[1]
+      let json_method =
+        {"int": "get_int", "string": "get_str", "float": "get_float"}.to_table[atype]
+      r[0][1].add(
+        new_call(
+          new_dot_expr(
+            new_nim_node(nnkBracketExpr).add(ident("j")).add(new_str_lit_node(aname)),
+            ident(json_method),
+          )
+        )
+      )
+    r
 
   quote:
     `definition`
-
     tools.add `new_tool`
-
-    tools_adapters.add `new_tool_adapter`
-    tools_adapters[^1].f = proc(j: JsonNode): JsonNode =
-      let first = j[`first_arg`].get_int()
-      let second = j[`second_arg`].get_int()
-      %*`name`(first, second)
+    tools_adapters[`name_str`] = (j: JsonNode) => `adapter`
 
 register_tool:
   func add_two_integers(first_integer: int, second_integer: int): int =
     first_integer + second_integer
+
+register_tool:
+  func concatenate_two_strings(first_string: string, second_string: string): string =
+    first_string & second_string
 
 proc write*(
     chat: var Chat, message: string, server_address: string = "http://127.0.0.1:11434"
@@ -102,16 +112,15 @@ proc write*(
   let resp = chat.client.request(
     server_address & "/api/chat", http_method = HttpPost, body = $ %*req
   )
-  dump resp.body
   let message = resp.body.parse_json["message"]
-  chat.messages.add(Message(role: "assistant", content: message["content"].get_str()))
 
   if "tool_calls" in message:
     for tc in message["tool_calls"]:
-      let function_name = tc["function"]["name"].get_str()
-      for a in tools_adapters:
-        if a.name == function_name:
-          echo a.f(tc["function"]["arguments"])
+      let name = tc["function"]["name"].get_str()
+      let args = tc["function"]["arguments"]
+      chat.messages.add(Message(role: "tool", content: $tools_adapters[name](args)))
+  else:
+    chat.messages.add(Message(role: "assistant", content: message["content"].get_str()))
 
   chat.client.close()
 
@@ -123,4 +132,6 @@ when is_main_module:
     options: Options(seed: 101, temperature: 0),
   )
   chat.write("Add two integer numbers: 2 and 1")
+  echo chat.messages[^1].content
+  chat.write("Concatenate two strings: 'lalala' and 'lololo'")
   echo chat.messages[^1].content
