@@ -90,14 +90,6 @@ macro register_tool(definition: untyped): untyped =
     tools.add `new_tool`
     tools_adapters[`name_str`] = (j: JsonNode) => `adapter`
 
-register_tool:
-  func add_two_integers(first_integer: int, second_integer: int): int =
-    first_integer + second_integer
-
-register_tool:
-  func concatenate_two_strings(first_string: string, second_string: string): string =
-    first_string & second_string
-
 proc write*(
     chat: var Chat, message: string, server_address: string = "http://127.0.0.1:11434"
 ) =
@@ -125,6 +117,14 @@ proc write*(
   chat.client.close()
 
 when is_main_module:
+  register_tool:
+    func add_two_integers(first_integer: int, second_integer: int): int =
+      first_integer + second_integer
+
+  register_tool:
+    func concatenate_two_strings(first_string: string, second_string: string): string =
+      first_string & second_string
+
   var chat = Chat(
     model: "granite3.1-dense",
     messages: @[],
@@ -132,6 +132,6 @@ when is_main_module:
     options: Options(seed: 101, temperature: 0),
   )
   chat.write("Add two integer numbers: 2 and 1")
-  echo chat.messages[^1].content
+  do_assert chat.messages[^1].content == "3"
   chat.write("Concatenate two strings: 'lalala' and 'lololo'")
-  echo chat.messages[^1].content
+  do_assert chat.messages[^1].content == "\"lalalalololo\""
