@@ -1,34 +1,33 @@
-import std/[httpclient, json, sugar, tables, macros]
+import std/[httpclient, json, sugar, tables, macros, os, options, times, strutils]
 
 type Message* = object
   role: string
   content: string
 
 type Options* = object
-  seed: int
-  temperature: float
+  seed: Option[int]
+  temperature: Option[float]
 
 type Chat* = object
   model: string
   messages: seq[Message]
-  client: HttpClient
-  options: Options
+  options: Option[Options]
 
-type Property* = object
+type Property = object
   `type`: string
   description: string
 
-type Parameters* = object
+type Parameters = object
   `type`: string
   properties: Table[string, Property]
   required: seq[string]
 
-type Function* = object
+type Function = object
   name: string
   description: string
   parameters: Parameters
 
-type Tool* = object
+type Tool = object
   `type`: string
   function: Function
 
@@ -36,8 +35,12 @@ type ChatRequest = object
   model: string
   messages: seq[Message]
   stream: bool
-  options: Options
+  options: Option[Options]
   tools: seq[Tool]
+
+type Config* = object
+  chat: Chat
+  server_address: string
 
 var tools: seq[Tool]
 var tools_adapters: Table[string, (JsonNode) -> JsonNode]
@@ -64,11 +67,11 @@ macro register_tool(definition: untyped): untyped =
   )
 
   let adapter = block:
-    let r = new_nim_node(nnkStmtList)
-    r.add(new_nim_node(nnkPrefix))
-    r[0].add(ident("%*"))
-    r[0].add(new_nim_node(nnkCall))
-    r[0][1].add(name)
+    let r = new_nim_node nnkStmtList
+    r.add new_nim_node nnkPrefix
+    r[0].add ident "%*"
+    r[0].add new_nim_node nnkCall
+    r[0][1].add name
     for i in 1 .. (args.len - 1):
       let adef = args[i]
       let aname = $adef[0]
@@ -90,48 +93,65 @@ macro register_tool(definition: untyped): untyped =
     tools.add `new_tool`
     tools_adapters[`name_str`] = (j: JsonNode) => `adapter`
 
-proc write*(
-    chat: var Chat, message: string, server_address: string = "http://127.0.0.1:11434"
-) =
-  chat.messages.add(Message(role: "user", content: message))
+proc prompt*(config: var Config) =
   let req = ChatRequest(
-    model: chat.model,
-    messages: chat.messages,
+    model: config.chat.model,
+    messages: config.chat.messages,
     stream: false,
-    options: chat.options,
+    options: config.chat.options,
     tools: tools,
   )
-  let resp = chat.client.request(
-    server_address & "/api/chat", http_method = HttpPost, body = $ %*req
+  let client = new_http_client()
+  let resp = client.request(
+    config.server_address & "/api/chat", http_method = HttpPost, body = $ %*req
   )
   let message = resp.body.parse_json["message"]
+  client.close
 
   if "tool_calls" in message:
     for tc in message["tool_calls"]:
       let name = tc["function"]["name"].get_str()
       let args = tc["function"]["arguments"]
-      chat.messages.add(Message(role: "tool", content: $tools_adapters[name](args)))
+      config.chat.messages.add Message(
+        role: "tool", content: $tools_adapters[name](args)
+      )
   else:
-    chat.messages.add(Message(role: "assistant", content: message["content"].get_str()))
+    config.chat.messages.add Message(
+      role: "assistant", content: message["content"].get_str()
+    )
 
-  chat.client.close()
+proc run_config_processor*(config_name: string) =
+  let configs_dir = get_config_dir() / "nilama"
+  let config_path = configs_dir / config_name & ".json"
+
+  var last_write_time = now().to_time
+  while true:
+    sleep 1000
+
+    if not config_path.file_exists:
+      echo "not exists"
+      continue
+
+    let info = config_path.get_file_info
+
+    let t = info.last_write_time
+    if last_write_time == t:
+      continue
+    last_write_time = t
+
+    var config = block:
+      try:
+        (parse_file configs_dir / config_name & ".json").to Config
+      except JsonParsingError as e:
+        echo "JSON parsing error: " & e.msg
+        continue
+    if not config.chat.messages[^1].content.ends_with "//":
+      continue
+
+    config.chat.messages[^1].content = config.chat.messages[^1].content[0 .. ^3]
+    prompt config
+
+    config_path.write_file pretty %*config
 
 when is_main_module:
-  register_tool:
-    func add_two_integers(first_integer: int, second_integer: int): int =
-      first_integer + second_integer
-
-  register_tool:
-    func concatenate_two_strings(first_string: string, second_string: string): string =
-      first_string & second_string
-
-  var chat = Chat(
-    model: "granite3.1-dense",
-    messages: @[],
-    client: new_http_client(),
-    options: Options(seed: 101, temperature: 0),
-  )
-  chat.write("Add two integer numbers: 2 and 1")
-  do_assert chat.messages[^1].content == "3"
-  chat.write("Concatenate two strings: 'lalala' and 'lololo'")
-  do_assert chat.messages[^1].content == "\"lalalalololo\""
+  run_config_processor param_str(1)
