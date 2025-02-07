@@ -1,18 +1,5 @@
 import std/[httpclient, json, sugar, tables, macros, os, options, times, strutils]
 
-type Message* = object
-  role: string
-  content: string
-
-type Options* = object
-  seed: Option[int]
-  temperature: Option[float]
-
-type Chat* = object
-  model: string
-  messages: seq[Message]
-  options: Option[Options]
-
 type Property = object
   `type`: string
   description: string
@@ -30,17 +17,6 @@ type Function = object
 type Tool = object
   `type`: string
   function: Function
-
-type ChatRequest = object
-  model: string
-  messages: seq[Message]
-  stream: bool
-  options: Option[Options]
-  tools: seq[Tool]
-
-type Config* = object
-  chat: Chat
-  server_address: string
 
 var tools: seq[Tool]
 var tools_adapters: Table[string, (JsonNode) -> JsonNode]
@@ -76,8 +52,9 @@ macro register_tool(definition: untyped): untyped =
       let adef = args[i]
       let aname = $adef[0]
       let atype = $adef[1]
-      let json_method =
-        {"int": "get_int", "string": "get_str", "float": "get_float"}.to_table[atype]
+      let json_method = {
+        "int": "get_int", "string": "get_str", "float": "get_float", "bool": "get_bool"
+      }.to_table[atype]
       r[0][1].add(
         new_call(
           new_dot_expr(
@@ -92,6 +69,30 @@ macro register_tool(definition: untyped): untyped =
     `definition`
     tools.add `new_tool`
     tools_adapters[`name_str`] = (j: JsonNode) => `adapter`
+
+type Message* = object
+  role*: string
+  content*: string
+
+type Options* = object
+  seed*: Option[int]
+  temperature*: Option[float]
+
+type Chat* = object
+  model*: string
+  messages*: seq[Message]
+  options*: Option[Options]
+
+type ChatRequest* = object
+  model*: string
+  messages*: seq[Message]
+  stream*: bool
+  options*: Option[Options]
+  tools*: seq[Tool]
+
+type Config* = object
+  chat*: Chat
+  server_address*: string
 
 proc prompt*(config: var Config) =
   let req = ChatRequest(
@@ -120,38 +121,37 @@ proc prompt*(config: var Config) =
       role: "assistant", content: message["content"].get_str()
     )
 
-proc run_config_processor*(config_name: string) =
-  let configs_dir = get_config_dir() / "nilama"
-  let config_path = configs_dir / config_name & ".json"
+proc process(config_path: string, last_write_time: var Time) =
+  if not config_path.file_exists:
+    return
 
-  var last_write_time = now().to_time
+  let t = config_path.get_file_info.last_write_time
+  if last_write_time == t:
+    return
+  last_write_time = t
+
+  var config = block:
+    try:
+      config_path.parse_file.to Config
+    except JsonParsingError as e:
+      echo "JSON parsing error: " & e.msg
+      return
+  if not config.chat.messages[^1].content.ends_with "//":
+    return
+
+  config.chat.messages[^1].content = config.chat.messages[^1].content[0 .. ^3]
+  prompt config
+
+  config_path.write_file pretty %*config
+
+proc run_config_processor*() =
+  var last_write_times: Table[string, Time]
   while true:
-    sleep 1000
-
-    if not config_path.file_exists:
-      echo "not exists"
-      continue
-
-    let info = config_path.get_file_info
-
-    let t = info.last_write_time
-    if last_write_time == t:
-      continue
-    last_write_time = t
-
-    var config = block:
-      try:
-        (parse_file configs_dir / config_name & ".json").to Config
-      except JsonParsingError as e:
-        echo "JSON parsing error: " & e.msg
-        continue
-    if not config.chat.messages[^1].content.ends_with "//":
-      continue
-
-    config.chat.messages[^1].content = config.chat.messages[^1].content[0 .. ^3]
-    prompt config
-
-    config_path.write_file pretty %*config
+    sleep 200
+    for path in walk_files get_config_dir() / "nilama" / "*":
+      if path notin last_write_times:
+        last_write_times[path] = 0.from_unix
+      path.process last_write_times[path]
 
 when is_main_module:
-  run_config_processor param_str(1)
+  run_config_processor()
