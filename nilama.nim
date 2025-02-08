@@ -1,7 +1,7 @@
 import
   std/[
-    httpclient, json, sugar, tables, macros, os, options, strutils, posix, inotify,
-    asyncdispatch,
+    httpclient, json, sugar, tables, macros, os, options, strutils, asyncdispatch,
+    asyncfutures, strformat, times,
   ]
 
 type Property = object
@@ -126,35 +126,37 @@ proc prompt*(config: Config): Future[Config] {.async.} =
     )
 
 proc process(config_path: string) {.async.} =
+  echo &"{config_path}: processing"
   var config = block:
     try:
       config_path.parse_file.to Config
     except [JsonParsingError, JsonKindError]:
-      echo "JSON parsing error: " & get_current_exception().msg
+      echo &"{config_path}: JSON parsing error: {get_current_exception().msg}"
       return
   if config.chat.messages.len == 0:
+    echo &"{config_path}: no messages"
     return
   if not config.chat.messages[^1].content.ends_with "//":
+    echo &"{config_path}: no end"
     return
 
   config.chat.messages[^1].content = config.chat.messages[^1].content[0 .. ^3]
   config = await prompt config
 
   config_path.write_file pretty %*config
+  echo &"{config_path}: OK"
 
-proc run_config_processor*() {.async.} =
-  const max_watches = 1024
-
-  let inotify_fd = inotify_init()
-  let config_dir = get_config_dir() / "nilama"
-  let wd = inotify_fd.inotify_add_watch(config_dir.cstring, IN_CLOSE_WRITE)
-
-  var events: array[max_watches, byte]
-  while (let n = read(inotifyFd, addr events, max_watches); n) > 0:
-    for e in inotify_events(addr events, n):
-      let path = config_dir / $cast[cstring](addr e[].name)
-      if path.ends_with ".json":
-        await path.process
+proc run_config_processor*() =
+  var last_write_times: Table[string, Time]
+  while true:
+    wait_for sleep_async 200
+    for path in walk_files get_config_dir() / "nilama" / "*.json":
+      if path notin last_write_times:
+        last_write_times[path] = 0.from_unix
+      let t = path.get_file_info.last_write_time
+      if last_write_times[path] != t:
+        discard path.process
+        last_write_times[path] = t
 
 when is_main_module:
-  wait_for run_config_processor()
+  run_config_processor()
