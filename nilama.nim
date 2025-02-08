@@ -1,4 +1,5 @@
-import std/[httpclient, json, sugar, tables, macros, os, options, times, strutils]
+import
+  std/[httpclient, json, sugar, tables, macros, os, options, strutils, posix, inotify]
 
 type Property = object
   `type`: string
@@ -121,15 +122,7 @@ proc prompt*(config: var Config) =
       role: "assistant", content: message["content"].get_str()
     )
 
-proc process(config_path: string, last_write_time: var Time) =
-  if not config_path.file_exists:
-    return
-
-  let t = config_path.get_file_info.last_write_time
-  if last_write_time == t:
-    return
-  last_write_time = t
-
+proc process(config_path: string) =
   var config = block:
     try:
       config_path.parse_file.to Config
@@ -145,13 +138,18 @@ proc process(config_path: string, last_write_time: var Time) =
   config_path.write_file pretty %*config
 
 proc run_config_processor*() =
-  var last_write_times: Table[string, Time]
-  while true:
-    sleep 200
-    for path in walk_files get_config_dir() / "nilama" / "*":
-      if path notin last_write_times:
-        last_write_times[path] = 0.from_unix
-      path.process last_write_times[path]
+  const max_watches = 1024
+
+  let inotify_fd = inotify_init()
+  let config_dir = get_config_dir() / "nilama"
+  let wd = inotify_fd.inotify_add_watch(config_dir.cstring, IN_CLOSE_WRITE)
+
+  var events: array[max_watches, byte]
+  while (let n = read(inotifyFd, addr events, max_watches); n) > 0:
+    for e in inotify_events(addr events, n):
+      let path = config_dir / $cast[cstring](addr e[].name)
+      if path.ends_with(".json"):
+        path.process
 
 when is_main_module:
   run_config_processor()
