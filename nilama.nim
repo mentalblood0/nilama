@@ -126,8 +126,8 @@ proc process(config_path: string) =
   var config = block:
     try:
       config_path.parse_file.to Config
-    except JsonParsingError as e:
-      echo "JSON parsing error: " & e.msg
+    except [JsonParsingError, JsonKindError]:
+      echo "JSON parsing error: " & get_current_exception().msg
       return
   if config.chat.messages.len == 0:
     return
@@ -150,7 +150,7 @@ proc run_config_processor*() =
   while (let n = read(inotifyFd, addr events, max_watches); n) > 0:
     for e in inotify_events(addr events, n):
       let path = config_dir / $cast[cstring](addr e[].name)
-      if path.ends_with(".json"):
+      if path.ends_with ".json":
         path.process
 
 when is_main_module:
