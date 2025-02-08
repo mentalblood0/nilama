@@ -1,5 +1,8 @@
 import
-  std/[httpclient, json, sugar, tables, macros, os, options, strutils, posix, inotify]
+  std/[
+    httpclient, json, sugar, tables, macros, os, options, strutils, posix, inotify,
+    asyncdispatch,
+  ]
 
 type Property = object
   `type`: string
@@ -95,7 +98,7 @@ type Config* = object
   chat*: Chat
   server_address*: string
 
-proc prompt*(config: var Config) =
+proc prompt*(config: Config): Future[Config] {.async.} =
   let req = ChatRequest(
     model: config.chat.model,
     messages: config.chat.messages,
@@ -103,26 +106,26 @@ proc prompt*(config: var Config) =
     options: config.chat.options,
     tools: tools,
   )
-  let client = new_http_client()
-  let resp = client.request(
-    config.server_address & "/api/chat", http_method = HttpPost, body = $ %*req
-  )
-  let message = resp.body.parse_json["message"]
+  let client = new_async_http_client()
+  let resp =
+    await client.post_content(config.server_address & "/api/chat", body = $ %*req)
+  let message = resp.parse_json["message"]
   client.close
 
+  result = config
   if "tool_calls" in message:
     for tc in message["tool_calls"]:
       let name = tc["function"]["name"].get_str()
       let args = tc["function"]["arguments"]
-      config.chat.messages.add Message(
+      result.chat.messages.add Message(
         role: "tool", content: $tools_adapters[name](args)
       )
   else:
-    config.chat.messages.add Message(
+    result.chat.messages.add Message(
       role: "assistant", content: message["content"].get_str()
     )
 
-proc process(config_path: string) =
+proc process(config_path: string) {.async.} =
   var config = block:
     try:
       config_path.parse_file.to Config
@@ -135,11 +138,11 @@ proc process(config_path: string) =
     return
 
   config.chat.messages[^1].content = config.chat.messages[^1].content[0 .. ^3]
-  prompt config
+  config = await prompt config
 
   config_path.write_file pretty %*config
 
-proc run_config_processor*() =
+proc run_config_processor*() {.async.} =
   const max_watches = 1024
 
   let inotify_fd = inotify_init()
@@ -151,7 +154,7 @@ proc run_config_processor*() =
     for e in inotify_events(addr events, n):
       let path = config_dir / $cast[cstring](addr e[].name)
       if path.ends_with ".json":
-        path.process
+        await path.process
 
 when is_main_module:
-  run_config_processor()
+  wait_for run_config_processor()
