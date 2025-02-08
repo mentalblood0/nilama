@@ -129,6 +129,8 @@ proc process(config_path: string) =
     except JsonParsingError as e:
       echo "JSON parsing error: " & e.msg
       return
+  if config.chat.messages.len == 0:
+    return
   if not config.chat.messages[^1].content.ends_with "//":
     return
 
